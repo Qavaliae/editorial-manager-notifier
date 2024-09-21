@@ -14,7 +14,7 @@ const Constants = {
 export const crawl = async (store: Store): Promise<State> => {
   // Launch the browser and open a new blank page
 
-  const browser = await puppeteer.launch({ headless: false })
+  const browser = await puppeteer.launch()
   const [page] = await browser.pages()
   await configureTimeout(browser)
 
