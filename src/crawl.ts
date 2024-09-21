@@ -25,6 +25,7 @@ export const crawl = async (store: Store): Promise<State> => {
   // Go to entry
 
   await gotoEntry(page, store.tracker, 5e3).catch(async () => {
+    console.log(`${store._id}: login required (?)`)
     await tryLogin(page, store)
     await gotoEntry(page, store.tracker)
   })
