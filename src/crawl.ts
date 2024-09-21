@@ -1,5 +1,12 @@
-import puppeteer, { Browser } from 'puppeteer'
+import puppeteer, { Browser, Frame, KeyboardTypeOptions, Page } from 'puppeteer'
 import { State, Store } from './types'
+
+const Constants = {
+  manuscriptNumber: 1,
+  title: 2,
+  statusDate: 4,
+  currentStatus: 5,
+}
 
 /**
  * Retrieve current state
@@ -7,34 +14,20 @@ import { State, Store } from './types'
 export const crawl = async (store: Store): Promise<State> => {
   // Launch the browser and open a new blank page
 
-  const browser = await puppeteer.launch()
-
-  // Prepare pages
-
+  const browser = await puppeteer.launch({ headless: false })
   const [page] = await browser.pages()
-  const connectPage = await browser.newPage()
-
   await configureTimeout(browser)
 
   // Restore cookies
 
   await loadCookies(store, browser)
 
-  // Science connect
-
-  await connectPage.goto('https://wiley.scienceconnect.io/dashboard', {
-    waitUntil: 'networkidle2',
-  })
-
-  await connectPage.waitForSelector(
-    'xpath///h2[text()="Institutional Memberships"]',
-  )
-
   // Go to entry
 
-  await page.bringToFront()
-  await page.goto(store.entry, { waitUntil: 'networkidle2' })
-  await page.waitForSelector('xpath///h1[text()="My Submissions"]')
+  await gotoEntry(page, store.tracker, 5e3).catch(async () => {
+    await tryLogin(page, store)
+    await gotoEntry(page, store.tracker)
+  })
 
   // Persist cookies
 
@@ -42,36 +35,69 @@ export const crawl = async (store: Store): Promise<State> => {
 
   // Fetch data
 
-  await page.goto(store.tracker, { waitUntil: 'networkidle2' })
-  const handle = await page.locator('body pre').waitHandle()
-  const response = await handle.evaluate((el) => el.textContent)
+  const iframe = await navigateToContentIframe(page)
+  const rows = await iframe.$$eval('#datatable tbody tr', (rows) => {
+    return rows.map((row) => {
+      const cells = row.querySelectorAll('td')
+      return Array.from(cells).map((cell) => cell.textContent?.trim())
+    })
+  })
 
   // Close browser
 
   await browser.close()
 
-  // Throw error if no response
+  // Gather state
 
-  if (!response) {
-    throw Error('Could not scrape data')
-  }
-
-  // Collect data
-
-  const json = JSON.parse(response)
-  const data = json.hits
-    .map((e: any) => e.actualStage.data)
-    .find((e: any) => e.registrySubmissionCode === store.submissionId)
-
-  // Return state
-
-  return {
+  const state: State = {
     ref: store.submissionId,
-    title: data.name,
-    status: data.state,
-    displayedStatus: data.workflowState,
-    modified: new Date(data.modified),
   }
+
+  const match = rows.find((row) => row[Constants.manuscriptNumber] == state.ref)
+  if (match !== undefined) {
+    state.title = match[Constants.title]
+    state.status = match[Constants.currentStatus]
+    state.modified = match[Constants.statusDate]
+  }
+
+  return state
+}
+
+const gotoEntry = async (page: Page, entry: string, timeout?: number) => {
+  await page.goto(entry, { waitUntil: 'networkidle2' })
+  const iframe = await navigateToContentIframe(page)
+  await iframe.waitForSelector('#datatable', { timeout })
+}
+
+const tryLogin = async (page: Page, { login, credentials }: Store) => {
+  // Load login page
+
+  await page.goto(login, { waitUntil: 'networkidle2' })
+  const iframe = await navigateToContentIframe(page)
+  await iframe.waitForSelector('#loginButtonsDiv')
+
+  // Input and submit credentials
+
+  const { username, password } = credentials
+  const opts: KeyboardTypeOptions = { delay: 100 }
+
+  await iframe.type('#userNamePasswordDiv #username', username, opts)
+  await iframe.type('#userNamePasswordDiv #passwordTextbox', password, opts)
+
+  await iframe.click('#loginButtonsDiv input[name="authorLogin"]')
+  await page.waitForNavigation()
+}
+
+const navigateToContentIframe = async (page: Page): Promise<Frame> => {
+  await page.waitForSelector('iframe[name=content]')
+  let iframeElement = await page.$('iframe[name=content]')
+
+  let iframe = await iframeElement?.contentFrame()
+  if (!iframe) {
+    throw Error('could not switch to content iframe')
+  }
+
+  return iframe
 }
 
 const configureTimeout = async (browser: Browser) => {
